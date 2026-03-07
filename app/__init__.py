@@ -6,7 +6,17 @@ from app.routes import register_routes
 
 def create_app():
     """Create and configure the Quart application"""
-    app = Quart(__name__)
+    # Crear app con configuración inicial para evitar KeyError
+    # El problema es que Quart accede a config durante __init__
+    app = Quart(
+        __name__,
+        static_folder=None,  # Deshabilitar static files para evitar el error
+        static_url_path=None
+    )
+    
+    # Establecer configuración necesaria
+    app.config["PROVIDE_AUTOMATIC_OPTIONS"] = True
+    
     app = cors(app, allow_origin="*")
     
     # Register routes
