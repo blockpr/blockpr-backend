@@ -1,6 +1,12 @@
+<<<<<<< HEAD
 quart==0.20.0
 quart-cors==0.7.0
 asyncpg==0.29.0
+=======
+quart>=0.20.0
+quart-cors>=0.7.0
+asyncpg>=0.30.0
+>>>>>>> de859b5ef86aa50223d1db362b5d8951a97acfa0
 python-dotenv==1.0.0
 PyJWT==2.8.0
 bcrypt==4.1.3
