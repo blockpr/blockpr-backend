@@ -1,0 +1,4 @@
+quart==0.19.4
+quart-cors==0.7.0
+asyncpg==0.29.0
+python-dotenv==1.0.0
