@@ -4,6 +4,19 @@ from app.services.hash_service import calculate_pdf_hash
 bp = Blueprint("hash_test", __name__)
 
 
+@bp.route("/test/hash-pdf", methods=["GET"])
+async def test_hash_pdf_get():
+    """Endpoint GET para verificar que el blueprint está registrado"""
+    return jsonify({
+        "success": True,
+        "message": "Endpoint de hash PDF está disponible. Usa POST para calcular el hash.",
+        "endpoint": "/test/hash-pdf",
+        "method": "POST",
+        "content_type": "multipart/form-data",
+        "field_name": "pdf, file o document"
+    }), 200
+
+
 @bp.route("/test/hash-pdf", methods=["POST"])
 async def test_hash_pdf():
     """
@@ -28,8 +41,11 @@ async def test_hash_pdf():
              -F "pdf=@certificado.pdf"
     """
     try:
-        # Obtener el archivo del request
-        files = await request.files
+        # Obtener el archivo del request (puede ser coroutine en Quart)
+        import inspect
+        files = request.files
+        if inspect.iscoroutine(files):
+            files = await files
         
         # Intentar obtener el archivo con diferentes nombres de campo comunes
         pdf_file = files.get("pdf") or files.get("file") or files.get("document")
@@ -40,8 +56,9 @@ async def test_hash_pdf():
                 "error": "No se encontró ningún archivo. Envía el PDF en el campo 'pdf', 'file' o 'document'"
             }), 400
         
-        # Leer el contenido del archivo
-        pdf_bytes = await pdf_file.read()
+        # Leer el contenido del archivo (read() es síncrono, no async)
+        pdf_file.stream.seek(0)  # Asegurar que estamos al inicio
+        pdf_bytes = pdf_file.read()
         
         if not pdf_bytes:
             return jsonify({
