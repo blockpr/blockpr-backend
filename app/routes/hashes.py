@@ -1,8 +1,10 @@
 from quart import Blueprint, request, jsonify
 from uuid import uuid4, UUID
 import json
+import os
 
 from app.services.hash_service import calculate_pdf_hash
+from app.services.solana_service import get_solana_service
 from app.config.database import get_db_pool
 from app.models.certificate import Certificate
 from app.utils.jwt_utils import require_auth
@@ -14,18 +16,20 @@ bp = Blueprint("certificates", __name__, url_prefix="/certificates")
 @require_auth
 async def create_certificate_hash():
     """
-    Endpoint para calcular el hash SHA-256 de un PDF y guardarlo en la base de datos.
+    Endpoint para calcular el hash SHA-256 de un PDF, registrarlo en Solana y guardarlo en la base de datos.
     
     Este endpoint forma parte del flujo del sistema:
     1. PDF generado
     2. Calcular SHA-256
-    3. Guardar hash en la base de datos
-    4. (Posteriormente) Incluir el certificado en un batch
-    5. (Posteriormente) Registrar el Merkle root en blockchain
+    3. Registrar hash en Solana usando programa Memo
+    4. Guardar hash y transacción en la base de datos
     
     Response:
         {
             "success": true,
+            "hash": "sha256_hash",
+            "transaction_signature": "solana_tx_signature",
+            "explorer_url": "https://solscan.io/tx/...",
             "certificate": {
                 "id": "uuid",
                 "user_id": "uuid",
@@ -82,11 +86,69 @@ async def create_certificate_hash():
                     "error": "El campo 'metadata' debe ser un JSON válido"
                 }), 400
         
+        # Obtener user_id del token autenticado
         user_id = UUID(request.user_id)
         
+        # Registrar hash en Solana
+        transaction_signature = None
+        explorer_url = None
+        solana_error = None
+        solana_result = None
+        
+        try:
+            solana_service = get_solana_service()
+            solana_result = await solana_service.register_hash(hash_value)
+            transaction_signature = solana_result["signature"]
+            explorer_url = solana_result["explorer_url"]
+        except Exception as e:
+            # Guardar el error pero continuar con el guardado en BD
+            solana_error = str(e)
+            # No retornamos error aquí, solo lo registramos para que el usuario sepa
+        
+        # Guardar en base de datos
         pool = get_db_pool()
         async with pool.acquire() as conn:
             certificate_id = uuid4()
+            blockchain_tx_id = None
+            
+            # Actualizar metadata para incluir información de Solana
+            if metadata is None:
+                metadata = {}
+            
+            # Si hay transacción de Solana, crear registro en blockchain_transactions
+            if transaction_signature and solana_result:
+                network = os.getenv("SOLANA_NETWORK", "mainnet")
+                tx_status = solana_result.get("status", "confirmed")
+                
+                # Crear registro en blockchain_transactions
+                # Para transacciones individuales, usamos el certificate_id como batch_id
+                blockchain_tx_row = await conn.fetchrow(
+                    """
+                    INSERT INTO blockchain_transactions (
+                        id, batch_id, blockchain, network, tx_hash,
+                        explorer_url, status, created_at, confirmed_at
+                    ) VALUES (
+                        $1, $2, $3, $4, $5,
+                        $6, $7, NOW(), CASE WHEN $7 = 'confirmed' THEN NOW() ELSE NULL END
+                    ) RETURNING id
+                    """,
+                    uuid4(),  # id de blockchain_transaction
+                    certificate_id,  # batch_id (usamos certificate_id para transacciones individuales)
+                    "solana",  # blockchain
+                    network,  # network
+                    transaction_signature,  # tx_hash
+                    explorer_url,  # explorer_url
+                    tx_status  # status
+                )
+                blockchain_tx_id = blockchain_tx_row["id"]
+                
+                metadata["solana_transaction"] = {
+                    "signature": transaction_signature,
+                    "explorer_url": explorer_url,
+                    "status": tx_status
+                }
+            if solana_error:
+                metadata["solana_error"] = solana_error
             
             row = await conn.fetchrow(
                 """
@@ -96,20 +158,39 @@ async def create_certificate_hash():
                     verification_url
                 ) VALUES (
                     $1, $2, $3, $4, $5,
-                    $6, NULL, NULL, NULL,
-                    NULL
+                    $6, NULL, NULL, $7,
+                    $8
                 ) RETURNING *
                 """,
                 certificate_id, user_id, external_id, certificate_type, hash_value,
-                metadata
+                json.dumps(metadata) if metadata else None,
+                blockchain_tx_id,  # blockchain_tx_id
+                explorer_url  # Guardar explorer_url en verification_url
             )
             
             certificate = Certificate.from_dict(dict(row))
         
-        return jsonify({
+        # Construir respuesta según formato esperado
+        if not transaction_signature:
+            # Si falla Solana, devolver error pero con hash calculado
+            return jsonify({
+                "success": False,
+                "hash": hash_value,
+                "error": f"No se pudo registrar en Solana: {solana_error}",
+                "transaction_signature": None,
+                "explorer_url": None
+            }), 500
+        
+        # Respuesta exitosa
+        response = {
             "success": True,
+            "hash": hash_value,
+            "transaction_signature": transaction_signature,
+            "explorer_url": explorer_url,
             "certificate": certificate.to_dict()
-        }), 201
+        }
+        
+        return jsonify(response), 201
         
     except ValueError as e:
         return jsonify({
