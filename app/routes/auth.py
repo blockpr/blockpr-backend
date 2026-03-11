@@ -1,5 +1,12 @@
 from quart import Blueprint, jsonify, request
 
+from uuid import UUID
+
+from app.services.api_key_service import (
+    delete_api_key,
+    generate_api_key,
+    list_user_api_keys,
+)
 from app.services.auth_service import (
     change_password,
     forgot_password,
@@ -196,3 +203,89 @@ async def me():
         "last_login_at": user.last_login_at.isoformat() if user.last_login_at else None,
         "created_at": user.created_at.isoformat(),
     })
+
+
+@bp.route("/api-keys", methods=["POST"])
+@require_auth
+async def create_api_key():
+    """Generar una nueva API key para el usuario autenticado."""
+    data = await request.get_json() or {}
+    name = data.get("name")
+    
+    # Debug: log el name recibido
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"Received data: {data}")
+    logger.info(f"Received name: {repr(name)}, type: {type(name)}")
+    
+    # Validar y limpiar el nombre
+    if name is not None:
+        if isinstance(name, str):
+            name = name.strip()
+            # Si después de strip queda vacío, convertir a None
+            if not name:
+                name = None
+        else:
+            # Si no es string, convertir a None
+            name = None
+    
+    logger.info(f"Processed name: {repr(name)}, type: {type(name)}")
+    
+    try:
+        user_id = UUID(request.user_id)
+        api_key, api_key_obj = await generate_api_key(user_id, name)
+        
+        logger.info(f"Created API key with name: {repr(api_key_obj.name)}")
+        
+        return jsonify({
+            "api_key": api_key,  # Solo se muestra una vez
+            "id": str(api_key_obj.id),
+            "name": api_key_obj.name,
+            "created_at": api_key_obj.created_at.isoformat(),
+        }), 201
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        logger.error(f"Error creating API key: {str(exc)}", exc_info=True)
+        return jsonify({"error": f"Failed to create API key: {str(exc)}"}), 500
+
+
+@bp.route("/api-keys", methods=["GET"])
+@require_auth
+async def list_api_keys():
+    """Listar todas las API keys del usuario autenticado."""
+    try:
+        user_id = UUID(request.user_id)
+        api_keys = await list_user_api_keys(user_id)
+        
+        return jsonify([
+            {
+                "id": str(ak.id),
+                "name": ak.name,
+                "created_at": ak.created_at.isoformat(),
+                "last_used_at": ak.last_used_at.isoformat() if ak.last_used_at else None,
+            }
+            for ak in api_keys
+        ])
+    except Exception as exc:
+        return jsonify({"error": f"Failed to list API keys: {str(exc)}"}), 500
+
+
+@bp.route("/api-keys/<api_key_id>", methods=["DELETE"])
+@require_auth
+async def delete_api_key_route(api_key_id: str):
+    """Eliminar una API key del usuario autenticado."""
+    try:
+        user_id = UUID(request.user_id)
+        api_key_uuid = UUID(api_key_id)
+        
+        deleted = await delete_api_key(api_key_uuid, user_id)
+        
+        if not deleted:
+            return jsonify({"error": "API key not found or does not belong to user"}), 404
+        
+        return jsonify({"message": "API key deleted successfully"})
+    except ValueError as exc:
+        return jsonify({"error": f"Invalid UUID: {str(exc)}"}), 400
+    except Exception as exc:
+        return jsonify({"error": f"Failed to delete API key: {str(exc)}"}), 500

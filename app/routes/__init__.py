@@ -1,4 +1,4 @@
-from app.routes import auth, health, hashes
+from app.routes import auth, health, hashes, public_api
 
 
 def register_routes(app):
@@ -6,3 +6,4 @@ def register_routes(app):
     app.register_blueprint(health.bp)
     app.register_blueprint(hashes.bp)
     app.register_blueprint(auth.bp)
+    app.register_blueprint(public_api.bp)
