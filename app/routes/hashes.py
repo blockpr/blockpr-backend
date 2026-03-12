@@ -121,24 +121,23 @@ async def create_certificate_hash():
                 tx_status = solana_result.get("status", "confirmed")
                 
                 # Crear registro en blockchain_transactions
-                # Para transacciones individuales, usamos el certificate_id como batch_id
+                # Para transacciones individuales, batch_id es NULL
                 blockchain_tx_row = await conn.fetchrow(
                     """
                     INSERT INTO blockchain_transactions (
                         id, batch_id, blockchain, network, tx_hash,
                         explorer_url, status, created_at, confirmed_at
                     ) VALUES (
-                        $1, $2, $3, $4, $5,
-                        $6, $7, NOW(), CASE WHEN $7 = 'confirmed' THEN NOW() ELSE NULL END
+                        $1, NULL, $2, $3, $4,
+                        $5, $6, NOW(), CASE WHEN $6 = 'confirmed' THEN NOW() ELSE NULL END
                     ) RETURNING id
                     """,
-                    uuid4(),  # id de blockchain_transaction
-                    certificate_id,  # batch_id (usamos certificate_id para transacciones individuales)
-                    "solana",  # blockchain
-                    network,  # network
-                    transaction_signature,  # tx_hash
-                    explorer_url,  # explorer_url
-                    tx_status  # status
+                    uuid4(),              # id de blockchain_transaction
+                    "solana",             # blockchain
+                    network,              # network
+                    transaction_signature, # tx_hash
+                    explorer_url,         # explorer_url
+                    tx_status             # status
                 )
                 blockchain_tx_id = blockchain_tx_row["id"]
                 
@@ -201,4 +200,98 @@ async def create_certificate_hash():
         return jsonify({
             "success": False,
             "error": f"Error al procesar el archivo: {str(e)}"
+        }), 500
+
+
+@bp.route("", methods=["GET"])
+@require_auth
+async def list_certificates():
+    """
+    Lista todas las emisiones del usuario autenticado, con datos de la transacción blockchain.
+
+    Query params:
+        page (int): Página (default 1)
+        limit (int): Resultados por página (default 20, max 100)
+
+    Response:
+        {
+            "success": true,
+            "data": [...],
+            "pagination": { "page": 1, "limit": 20, "total": 50, "pages": 3 }
+        }
+    """
+    try:
+        user_id = UUID(request.user_id)
+
+        page = max(1, int(request.args.get("page", 1)))
+        limit = min(100, max(1, int(request.args.get("limit", 20))))
+        offset = (page - 1) * limit
+
+        pool = get_db_pool()
+        async with pool.acquire() as conn:
+            total = await conn.fetchval(
+                "SELECT COUNT(*) FROM certificates WHERE user_id = $1",
+                user_id
+            )
+
+            rows = await conn.fetch(
+                """
+                SELECT
+                    c.id,
+                    c.user_id,
+                    c.external_id,
+                    c.certificate_type,
+                    c.document_hash,
+                    c.verification_url,
+                    c.created_at,
+                    bt.tx_hash        AS transaction_signature,
+                    bt.explorer_url,
+                    bt.blockchain,
+                    bt.network,
+                    bt.status         AS blockchain_status,
+                    bt.confirmed_at
+                FROM certificates c
+                LEFT JOIN blockchain_transactions bt ON bt.id = c.blockchain_tx_id
+                WHERE c.user_id = $1
+                ORDER BY c.created_at DESC
+                LIMIT $2 OFFSET $3
+                """,
+                user_id, limit, offset
+            )
+
+        data = []
+        for row in rows:
+            data.append({
+                "id": str(row["id"]),
+                "external_id": row["external_id"],
+                "certificate_type": row["certificate_type"],
+                "document_hash": row["document_hash"],
+                "created_at": row["created_at"].isoformat(),
+                "blockchain": {
+                    "transaction_signature": row["transaction_signature"],
+                    "explorer_url": row["explorer_url"] or row["verification_url"],
+                    "blockchain": row["blockchain"],
+                    "network": row["network"],
+                    "status": row["blockchain_status"],
+                    "confirmed_at": row["confirmed_at"].isoformat() if row["confirmed_at"] else None,
+                }
+            })
+
+        pages = (total + limit - 1) // limit
+
+        return jsonify({
+            "success": True,
+            "data": data,
+            "pagination": {
+                "page": page,
+                "limit": limit,
+                "total": total,
+                "pages": pages,
+            }
+        }), 200
+
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e)
         }), 500
