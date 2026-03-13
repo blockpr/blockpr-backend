@@ -102,18 +102,18 @@ async def create_certificate_hash():
                 tx_status = solana_result.get("status", "confirmed")
                 
                 # Crear registro en blockchain_transactions
+                # Para transacciones individuales, batch_id es NULL
                 blockchain_tx_row = await conn.fetchrow(
                     """
                     INSERT INTO blockchain_transactions (
                         id, batch_id, blockchain, network, tx_hash,
                         explorer_url, status, created_at, confirmed_at
                     ) VALUES (
-                        $1, $2, $3, $4, $5,
-                        $6, $7, NOW(), CASE WHEN $7 = 'confirmed' THEN NOW() ELSE NULL END
+                        $1, NULL, $2, $3, $4,
+                        $5, $6, NOW(), CASE WHEN $6 = 'confirmed' THEN NOW() ELSE NULL END
                     ) RETURNING id
                     """,
                     uuid4(),
-                    certificate_id,
                     "solana",
                     network,
                     transaction_signature,
