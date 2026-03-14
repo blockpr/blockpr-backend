@@ -208,23 +208,12 @@ async def change_password_route():
 
 
 @bp.route("/me", methods=["GET"])
+@require_auth
 async def me():
-    """Get current user from cookie (web)"""
+    """Get current user from cookie or Bearer token"""
     from app.services.auth_service import get_user_by_id
-    from app.config.database import get_db_pool
-    
-    token = request.cookies.get("token")
-    if not token:
-        return jsonify({"error": "No autenticado"}), 401
 
-    try:
-        payload = decode_access_token(token)
-        if payload.get("type") != "access":
-            raise ValueError("Not an access token")
-        user_id = payload["sub"]
-    except Exception as e:
-        return jsonify({"error": "Token inválido o expirado"}), 401
-
+    user_id = request.user_id
     user = await get_user_by_id(user_id)
     if not user:
         return jsonify({"error": "Usuario no encontrado"}), 404
