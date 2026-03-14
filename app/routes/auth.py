@@ -1,4 +1,6 @@
-from quart import Blueprint, jsonify, request
+from quart import Blueprint, jsonify, request, current_app
+from quart.wrappers.response import Response
+from quart.utils import run_sync
 
 from uuid import UUID
 
@@ -17,7 +19,7 @@ from app.services.auth_service import (
     resend_verification,
     verify_email,
 )
-from app.utils.jwt_utils import require_auth
+from app.utils.jwt_utils import require_auth, decode_access_token
 
 bp = Blueprint("auth", __name__, url_prefix="/auth")
 
@@ -78,16 +80,35 @@ async def login():
             return jsonify({"error": "Please verify your email before logging in."}), 403
         return jsonify({"error": "Invalid credentials"}), 401
 
-    return jsonify({
+    # Create response with user data
+    response: Response = await run_sync(jsonify)({
+        "message": "Login exitoso",
         "user": {
             "id": str(user.id),
             "email": user.email,
             "company_name": user.company_name,
+            "tax_id": user.tax_id,
+            "contact_name": user.contact_name,
+            "contact_phone": user.contact_phone,
+            "address": user.address,
+            "city": user.city,
+            "country": user.country,
+            "email_verified": user.email_verified,
         },
-        "access_token": access_token,
-        "refresh_token": refresh_token,
-        "token_type": "Bearer",
     })
+
+    # Set cookie with access token
+    is_secure = not current_app.config.get('DEBUG', False)
+    response.set_cookie(
+        "token",
+        access_token,
+        httponly=True,
+        samesite="Lax",
+        secure=is_secure,
+        path="/",
+        max_age=60 * 60 * 24 * 14  # 14 days
+    )
+    return response
 
 
 @bp.route("/refresh", methods=["POST"])
@@ -112,14 +133,18 @@ async def refresh():
 
 @bp.route("/logout", methods=["POST"])
 async def logout():
+    """Logout user and clear cookie"""
+    # Try to get refresh_token from body (for API clients)
     data = await request.get_json(silent=True) or {}
-    token = data.get("refresh_token", "")
-
-    if not token:
-        return jsonify({"error": "refresh_token is required"}), 400
-
-    await logout_user(token)
-    return jsonify({"message": "Logged out successfully"})
+    refresh_token = data.get("refresh_token", "")
+    
+    if refresh_token:
+        await logout_user(refresh_token)
+    
+    # Clear cookie
+    response: Response = await run_sync(jsonify)({"message": "Logged out successfully"})
+    response.set_cookie("token", "", httponly=True, samesite="Lax", secure=not current_app.config.get('DEBUG', False), path="/", max_age=0)
+    return response
 
 
 @bp.route("/verify-email", methods=["POST"])
@@ -183,25 +208,42 @@ async def change_password_route():
 
 
 @bp.route("/me", methods=["GET"])
-@require_auth
 async def me():
+    """Get current user from cookie (web)"""
     from app.services.auth_service import get_user_by_id
-    user = await get_user_by_id(request.user_id)
+    from app.config.database import get_db_pool
+    
+    token = request.cookies.get("token")
+    if not token:
+        return jsonify({"error": "No autenticado"}), 401
+
+    try:
+        payload = decode_access_token(token)
+        if payload.get("type") != "access":
+            raise ValueError("Not an access token")
+        user_id = payload["sub"]
+    except Exception as e:
+        return jsonify({"error": "Token inválido o expirado"}), 401
+
+    user = await get_user_by_id(user_id)
     if not user:
-        return jsonify({"error": "User not found"}), 404
+        return jsonify({"error": "Usuario no encontrado"}), 404
+    
     return jsonify({
-        "id": str(user.id),
-        "email": user.email,
-        "company_name": user.company_name,
-        "tax_id": user.tax_id,
-        "contact_name": user.contact_name,
-        "contact_phone": user.contact_phone,
-        "address": user.address,
-        "city": user.city,
-        "country": user.country,
-        "email_verified": user.email_verified,
-        "last_login_at": user.last_login_at.isoformat() if user.last_login_at else None,
-        "created_at": user.created_at.isoformat(),
+        "user": {
+            "id": str(user.id),
+            "email": user.email,
+            "company_name": user.company_name,
+            "tax_id": user.tax_id,
+            "contact_name": user.contact_name,
+            "contact_phone": user.contact_phone,
+            "address": user.address,
+            "city": user.city,
+            "country": user.country,
+            "email_verified": user.email_verified,
+            "last_login_at": user.last_login_at.isoformat() if user.last_login_at else None,
+            "created_at": user.created_at.isoformat(),
+        }
     })
 
 
