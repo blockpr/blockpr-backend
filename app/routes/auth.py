@@ -143,7 +143,8 @@ async def logout():
     
     # Clear cookie
     response: Response = await run_sync(jsonify)({"message": "Logged out successfully"})
-    response.set_cookie("token", "", httponly=True, samesite="Lax", secure=not current_app.config.get('DEBUG', False), path="/", max_age=0)
+    # Usar delete_cookie para asegurarnos de que el navegador invalida la cookie
+    response.delete_cookie("token", path="/")
     return response
 
 
