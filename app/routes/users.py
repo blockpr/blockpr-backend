@@ -1,5 +1,6 @@
 from uuid import UUID
 
+import bcrypt
 from quart import Blueprint, jsonify, request
 
 from app.config.database import get_db_pool
@@ -90,3 +91,57 @@ async def update_profile():
         )
     except Exception as exc:  # pragma: no cover - fallback genérico
         return jsonify({"error": f"Failed to update profile: {str(exc)}"}), 500
+
+
+@bp.route("/change-password", methods=["POST"])
+@require_auth
+async def change_password():
+    data = await request.get_json(silent=True) or {}
+
+    current_password = data.get("current_password", "")
+    new_password = data.get("new_password", "")
+
+    if not current_password or not new_password:
+        return jsonify({"error": "Se requieren la contraseña actual y la nueva"}), 400
+
+    if len(new_password) < 8:
+        return jsonify({"error": "La nueva contraseña debe tener al menos 8 caracteres"}), 400
+
+    if current_password == new_password:
+        return jsonify({"error": "La nueva contraseña debe ser diferente a la actual"}), 400
+
+    user_id = UUID(request.user_id)
+    pool = get_db_pool()
+
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT id, password_hash FROM users WHERE id = $1 AND is_active = true",
+                user_id,
+            )
+            if not row:
+                return jsonify({"error": "Usuario no encontrado"}), 404
+
+            # Verificar la contraseña actual
+            if not bcrypt.checkpw(current_password.encode(), row["password_hash"].encode()):
+                return jsonify({"error": "La contraseña actual es incorrecta"}), 400
+
+            # Hashear y guardar la nueva
+            new_hash = bcrypt.hashpw(new_password.encode(), bcrypt.gensalt()).decode()
+            from datetime import datetime
+            now = datetime.utcnow()
+
+            await conn.execute(
+                "UPDATE users SET password_hash = $1, updated_at = $2 WHERE id = $3",
+                new_hash, now, user_id,
+            )
+            # Invalidar todos los refresh tokens existentes por seguridad
+            await conn.execute(
+                "UPDATE user_tokens SET used = true WHERE user_id = $1 AND type = 'refresh'",
+                user_id,
+            )
+
+        return jsonify({"message": "Contraseña actualizada correctamente"}), 200
+
+    except Exception as exc:  # pragma: no cover
+        return jsonify({"error": f"Error al cambiar la contraseña: {str(exc)}"}), 500

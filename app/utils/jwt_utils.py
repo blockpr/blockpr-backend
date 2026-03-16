@@ -29,14 +29,21 @@ def decode_access_token(token: str) -> dict:
 
 
 def require_auth(f):
-    """Decorator that enforces a valid Bearer JWT on the decorated Quart route."""
+    """Decorator that enforces a valid JWT from cookie or Bearer header."""
     @wraps(f)
     async def decorated(*args, **kwargs):
-        auth_header = request.headers.get("Authorization", "")
-        if not auth_header.startswith("Bearer "):
-            return jsonify({"error": "Missing or invalid Authorization header"}), 401
+        # Try to get token from cookie first (for web)
+        token = request.cookies.get("token")
+        
+        # If no cookie, try Authorization header (for API clients)
+        if not token:
+            auth_header = request.headers.get("Authorization", "")
+            if auth_header.startswith("Bearer "):
+                token = auth_header[7:]
+        
+        if not token:
+            return jsonify({"error": "Missing or invalid authentication"}), 401
 
-        token = auth_header[7:]
         try:
             payload = decode_access_token(token)
             if payload.get("type") != "access":
