@@ -170,9 +170,12 @@ async def get_user_sessions():
                             "user_id": str(row["user_id"]) if row["user_id"] else None,
                             "device_name": row["device_name"],
                             "device_specs": row["device_specs"],
-                            "action": row["action"],
+                            "is_opened": row["is_opened"],
                             "created_at": row["created_at"].isoformat()
                             if row["created_at"]
+                            else None,
+                            "updated_at": row["updated_at"].isoformat()
+                            if row["updated_at"]
                             else None,
                         }
                         for row in rows

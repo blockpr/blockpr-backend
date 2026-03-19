@@ -72,7 +72,7 @@ async def login():
     password = data.get("password", "")
     device_name = data.get("device_name")
     device_specs = data.get("device_specs")
-    action = data.get("action", "login")
+    
     if not email or not password:
         return jsonify({"error": "email and password are required"}), 400
 
@@ -84,7 +84,7 @@ async def login():
         return jsonify({"error": "Invalid credentials"}), 401
 
     try:
-        await create_user_session(user.id, device_name, device_specs, action)
+        await create_user_session(user.id, device_name, device_specs, True)
     except Exception as exc:
         print(f"Error creating user session: {exc}")
         return jsonify({"error": "Failed to create user session"}), 500
@@ -148,7 +148,6 @@ async def logout():
     refresh_token = data.get("refresh_token", "")
     device_name = data.get("device_name")
     device_specs = data.get("device_specs")
-    action = data.get("action", "logout")
 
     if refresh_token:
         await logout_user(refresh_token)
@@ -158,7 +157,7 @@ async def logout():
         if token_cookie:
             payload = decode_access_token(token_cookie)
             if payload:
-                await create_user_session(payload["sub"], device_name, device_specs, action)
+                await create_user_session(payload["sub"], device_name, device_specs, False)
     except Exception:
         pass
 
