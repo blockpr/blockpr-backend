@@ -19,6 +19,7 @@ from app.services.auth_service import (
     resend_verification,
     verify_email,
 )
+from app.services.session_service import create_user_session
 from app.utils.jwt_utils import require_auth, decode_access_token
 
 bp = Blueprint("auth", __name__, url_prefix="/auth")
@@ -69,7 +70,9 @@ async def login():
 
     email = data.get("email", "").strip().lower()
     password = data.get("password", "")
-
+    device_name = data.get("device_name")
+    device_specs = data.get("device_specs")
+    action = data.get("action", "login")
     if not email or not password:
         return jsonify({"error": "email and password are required"}), 400
 
@@ -79,6 +82,12 @@ async def login():
         if str(exc) == "EMAIL_NOT_VERIFIED":
             return jsonify({"error": "Please verify your email before logging in."}), 403
         return jsonify({"error": "Invalid credentials"}), 401
+
+    try:
+        await create_user_session(user.id, device_name, device_specs, action)
+    except Exception as exc:
+        print(f"Error creating user session: {exc}")
+        return jsonify({"error": "Failed to create user session"}), 500
 
     # Create response with user data
     response: Response = await run_sync(jsonify)({
@@ -137,10 +146,22 @@ async def logout():
     # Try to get refresh_token from body (for API clients)
     data = await request.get_json(silent=True) or {}
     refresh_token = data.get("refresh_token", "")
-    
+    device_name = data.get("device_name")
+    device_specs = data.get("device_specs")
+    action = data.get("action", "logout")
+
     if refresh_token:
         await logout_user(refresh_token)
-    
+
+    try:
+        token_cookie = request.cookies.get("token")
+        if token_cookie:
+            payload = decode_access_token(token_cookie)
+            if payload:
+                await create_user_session(payload["sub"], device_name, device_specs, action)
+    except Exception:
+        pass
+
     # Clear cookie
     response: Response = await run_sync(jsonify)({"message": "Logged out successfully"})
     # Usar delete_cookie para asegurarnos de que el navegador invalida la cookie

@@ -145,3 +145,40 @@ async def change_password():
 
     except Exception as exc:  # pragma: no cover
         return jsonify({"error": f"Error al cambiar la contraseña: {str(exc)}"}), 500
+    
+@bp.route("/user-sessions", methods=["GET"])
+@require_auth
+async def get_user_sessions():
+    user_id = UUID(request.user_id)
+    pool = get_db_pool()
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT DISTINCT ON (device_name, device_specs) *
+                FROM user_sessions
+                WHERE user_id = $1
+                ORDER BY device_name, device_specs, created_at DESC
+                """,
+                user_id,
+            )
+            return (
+                jsonify(
+                    [
+                        {
+                            "id": row["id"],
+                            "user_id": str(row["user_id"]) if row["user_id"] else None,
+                            "device_name": row["device_name"],
+                            "device_specs": row["device_specs"],
+                            "action": row["action"],
+                            "created_at": row["created_at"].isoformat()
+                            if row["created_at"]
+                            else None,
+                        }
+                        for row in rows
+                    ]
+                ),
+                200,
+            )
+    except Exception as exc:  # pragma: no cover
+        return jsonify({"error": f"Failed to get user sessions: {str(exc)}"}), 500
