@@ -8,6 +8,10 @@ from app.services.solana_service import get_solana_service
 from app.config.database import get_db_pool
 from app.models.certificate import Certificate
 from app.utils.jwt_utils import require_auth
+from app.utils.certificate_emission import (
+    merge_emission_metadata,
+    build_certificate_verification_url,
+)
 
 bp = Blueprint("certificates", __name__, url_prefix="/certificates")
 
@@ -72,19 +76,36 @@ async def create_certificate_hash():
         hash_value = calculate_pdf_hash(pdf_bytes)
         
         form_data = await request.form
-        external_id = form_data.get("external_id")
-        certificate_type = form_data.get("certificate_type")
-        
-        metadata = None
-        metadata_str = form_data.get("metadata")
+        form_dict = dict(form_data)
+        external_id = form_dict.get("external_id")
+        if external_id is not None and isinstance(external_id, str):
+            external_id = external_id.strip() or None
+        if not external_id:
+            id_ext = form_dict.get("identificador_externo")
+            if id_ext is not None and str(id_ext).strip():
+                external_id = str(id_ext).strip()
+
+        certificate_type = form_dict.get("certificate_type")
+        if certificate_type is not None and isinstance(certificate_type, str):
+            certificate_type = certificate_type.strip() or None
+
+        metadata_from_json = None
+        metadata_str = form_dict.get("metadata")
         if metadata_str:
             try:
-                metadata = json.loads(metadata_str)
+                metadata_from_json = json.loads(metadata_str)
+                if not isinstance(metadata_from_json, dict):
+                    return jsonify({
+                        "success": False,
+                        "error": "El campo 'metadata' debe ser un objeto JSON"
+                    }), 400
             except json.JSONDecodeError:
                 return jsonify({
                     "success": False,
                     "error": "El campo 'metadata' debe ser un JSON válido"
                 }), 400
+
+        metadata = merge_emission_metadata(form_dict, metadata_from_json)
         
         # Obtener user_id del token autenticado
         user_id = UUID(request.user_id)
@@ -109,12 +130,9 @@ async def create_certificate_hash():
         pool = get_db_pool()
         async with pool.acquire() as conn:
             certificate_id = uuid4()
+            verification_url = build_certificate_verification_url(certificate_id)
             blockchain_tx_id = None
-            
-            # Actualizar metadata para incluir información de Solana
-            if metadata is None:
-                metadata = {}
-            
+
             # Si hay transacción de Solana, crear registro en blockchain_transactions
             if transaction_signature and solana_result:
                 network = os.getenv("SOLANA_NETWORK", "mainnet")
@@ -163,8 +181,8 @@ async def create_certificate_hash():
                 """,
                 certificate_id, user_id, external_id, certificate_type, hash_value,
                 json.dumps(metadata) if metadata else None,
-                blockchain_tx_id,  # blockchain_tx_id
-                explorer_url  # Guardar explorer_url en verification_url
+                blockchain_tx_id,
+                verification_url
             )
             
             certificate = Certificate.from_dict(dict(row))
@@ -186,6 +204,7 @@ async def create_certificate_hash():
             "hash": hash_value,
             "transaction_signature": transaction_signature,
             "explorer_url": explorer_url,
+            "verification_url": certificate.verification_url,
             "certificate": certificate.to_dict()
         }
         
@@ -242,6 +261,7 @@ async def list_certificates():
                     c.external_id,
                     c.certificate_type,
                     c.document_hash,
+                    c.metadata,
                     c.verification_url,
                     c.created_at,
                     bt.tx_hash        AS transaction_signature,
@@ -266,10 +286,12 @@ async def list_certificates():
                 "external_id": row["external_id"],
                 "certificate_type": row["certificate_type"],
                 "document_hash": row["document_hash"],
+                "metadata": row["metadata"],
+                "verification_url": row["verification_url"],
                 "created_at": row["created_at"].isoformat(),
                 "blockchain": {
                     "transaction_signature": row["transaction_signature"],
-                    "explorer_url": row["explorer_url"] or row["verification_url"],
+                    "explorer_url": row["explorer_url"],
                     "blockchain": row["blockchain"],
                     "network": row["network"],
                     "status": row["blockchain_status"],

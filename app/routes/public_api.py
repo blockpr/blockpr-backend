@@ -8,10 +8,87 @@ from app.services.hash_service import calculate_pdf_hash
 from app.services.solana_service import get_solana_service
 from app.config.database import get_db_pool
 from app.models.certificate import Certificate
-from app.services.certificate_verification_service import verify_certificate_by_hash
 from app.utils.api_key_auth import require_api_key
+from app.utils.certificate_emission import (
+    merge_emission_metadata,
+    build_certificate_verification_url,
+)
 
 bp = Blueprint("public_api", __name__, url_prefix="/public")
+
+
+@bp.route("/certificates/<certificate_id>", methods=["GET"])
+async def get_public_certificate(certificate_id: str):
+    """
+    Consulta pública de una emisión por ID (sin API key).
+    No expone user_id ni datos sensibles del usuario más allá del nombre de empresa emisora.
+    """
+    try:
+        cert_uuid = UUID(certificate_id)
+    except ValueError:
+        return jsonify({"error": "not_found"}), 404
+
+    pool = get_db_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT
+                c.id,
+                c.external_id,
+                c.certificate_type,
+                c.document_hash,
+                c.metadata,
+                c.verification_url,
+                c.created_at,
+                u.company_name AS issuer_company_name,
+                bt.tx_hash AS transaction_signature,
+                bt.explorer_url,
+                bt.blockchain,
+                bt.network,
+                bt.status AS blockchain_status,
+                bt.confirmed_at
+            FROM certificates c
+            INNER JOIN users u ON u.id = c.user_id
+            LEFT JOIN blockchain_transactions bt ON bt.id = c.blockchain_tx_id
+            WHERE c.id = $1
+            """,
+            cert_uuid,
+        )
+
+    if not row:
+        return jsonify({"error": "not_found"}), 404
+
+    metadata = row["metadata"]
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except json.JSONDecodeError:
+            metadata = None
+
+    return jsonify(
+        {
+            "certificate": {
+                "id": str(row["id"]),
+                "external_id": row["external_id"],
+                "certificate_type": row["certificate_type"],
+                "document_hash": row["document_hash"],
+                "metadata": metadata,
+                "verification_url": row["verification_url"],
+                "created_at": row["created_at"].isoformat(),
+            },
+            "issuer": {
+                "company_name": row["issuer_company_name"] or "",
+            },
+            "blockchain": {
+                "transaction_signature": row["transaction_signature"],
+                "explorer_url": row["explorer_url"],
+                "blockchain": row["blockchain"],
+                "network": row["network"],
+                "status": row["blockchain_status"],
+                "confirmed_at": row["confirmed_at"].isoformat() if row["confirmed_at"] else None,
+            },
+        }
+    ), 200
 
 
 @bp.route("/certificates/hash", methods=["POST"])
@@ -54,19 +131,36 @@ async def create_certificate_hash():
         hash_value = calculate_pdf_hash(pdf_bytes)
         
         form_data = await request.form
-        external_id = form_data.get("external_id")
-        certificate_type = form_data.get("certificate_type")
-        
-        metadata = None
-        metadata_str = form_data.get("metadata")
+        form_dict = dict(form_data)
+        external_id = form_dict.get("external_id")
+        if external_id is not None and isinstance(external_id, str):
+            external_id = external_id.strip() or None
+        if not external_id:
+            id_ext = form_dict.get("identificador_externo")
+            if id_ext is not None and str(id_ext).strip():
+                external_id = str(id_ext).strip()
+
+        certificate_type = form_dict.get("certificate_type")
+        if certificate_type is not None and isinstance(certificate_type, str):
+            certificate_type = certificate_type.strip() or None
+
+        metadata_from_json = None
+        metadata_str = form_dict.get("metadata")
         if metadata_str:
             try:
-                metadata = json.loads(metadata_str)
+                metadata_from_json = json.loads(metadata_str)
+                if not isinstance(metadata_from_json, dict):
+                    return jsonify({
+                        "success": False,
+                        "error": "El campo 'metadata' debe ser un objeto JSON"
+                    }), 400
             except json.JSONDecodeError:
                 return jsonify({
                     "success": False,
                     "error": "El campo 'metadata' debe ser un JSON válido"
                 }), 400
+
+        metadata = merge_emission_metadata(form_dict, metadata_from_json)
         
         # Obtener user_id del API key autenticado
         user_id = UUID(request.user_id)
@@ -90,11 +184,8 @@ async def create_certificate_hash():
         pool = get_db_pool()
         async with pool.acquire() as conn:
             certificate_id = uuid4()
+            verification_url = build_certificate_verification_url(certificate_id)
             blockchain_tx_id = None
-            
-            # Actualizar metadata para incluir información de Solana
-            if metadata is None:
-                metadata = {}
             
             # Si hay transacción de Solana, crear registro en blockchain_transactions
             if transaction_signature and solana_result:
@@ -145,7 +236,7 @@ async def create_certificate_hash():
                 certificate_id, user_id, external_id, certificate_type, hash_value,
                 json.dumps(metadata) if metadata else None,
                 blockchain_tx_id,
-                explorer_url
+                verification_url
             )
             
             certificate = Certificate.from_dict(dict(row))
@@ -167,6 +258,7 @@ async def create_certificate_hash():
             "hash": hash_value,
             "transaction_signature": transaction_signature,
             "explorer_url": explorer_url,
+            "verification_url": certificate.verification_url,
             "certificate": certificate.to_dict()
         }
         
@@ -180,85 +272,5 @@ async def create_certificate_hash():
     except Exception as e:
         return jsonify({
             "success": False,
-            "error": f"Error al procesar el archivo: {str(e)}"
-        }), 500
-
-
-@bp.route("/certificates/verify", methods=["POST"])
-@require_api_key
-async def verify_certificate():
-    """
-    Endpoint público para validar un certificado subiendo un archivo PDF.
-    Calcula el hash del archivo y verifica si existe en la base de datos,
-    retornando información del certificado y su transacción blockchain asociada.
-    
-    Requiere autenticación por API key.
-    """
-    try:
-        files = request.files
-        if inspect.iscoroutine(files):
-            files = await files
-        
-        pdf_file = files.get("pdf") or files.get("file") or files.get("document")
-        
-        if not pdf_file:
-            return jsonify({
-                "valid": False,
-                "error": "No se encontró ningún archivo. Envía el PDF en el campo 'pdf', 'file' o 'document'"
-            }), 400
-        
-        pdf_file.stream.seek(0)
-        pdf_bytes = pdf_file.read()
-        
-        if not pdf_bytes:
-            return jsonify({
-                "valid": False,
-                "error": "El archivo está vacío"
-            }), 400
-        
-        if not pdf_bytes.startswith(b"%PDF"):
-            return jsonify({
-                "valid": False,
-                "error": "El archivo no parece ser un PDF válido (debe empezar con %PDF)"
-            }), 400
-        
-        # Calcular hash SHA-256 del archivo
-        document_hash = calculate_pdf_hash(pdf_bytes)
-        
-        # Verificar si el certificado existe
-        verification_result = await verify_certificate_by_hash(document_hash)
-        
-        if not verification_result:
-            return jsonify({
-                "valid": False,
-                "message": "Certificate not found",
-                "document_hash": document_hash
-            }), 200
-        
-        certificate = verification_result["certificate"]
-        blockchain_transaction = verification_result["blockchain_transaction"]
-        
-        # Construir respuesta
-        response = {
-            "valid": True,
-            "certificate": certificate,
-        }
-        
-        if blockchain_transaction:
-            response["blockchain_transaction"] = blockchain_transaction
-        else:
-            response["blockchain_transaction"] = None
-            response["message"] = "Certificate found but not registered on blockchain"
-        
-        return jsonify(response), 200
-        
-    except ValueError as e:
-        return jsonify({
-            "valid": False,
-            "error": str(e)
-        }), 400
-    except Exception as e:
-        return jsonify({
-            "valid": False,
             "error": f"Error al procesar el archivo: {str(e)}"
         }), 500
