@@ -8,6 +8,7 @@ from app.services.hash_service import calculate_pdf_hash
 from app.services.solana_service import get_solana_service
 from app.config.database import get_db_pool
 from app.models.certificate import Certificate
+from app.services.api_key_service import validate_api_key
 from app.utils.api_key_auth import require_api_key
 from app.utils.certificate_emission import (
     merge_emission_metadata,
@@ -89,6 +90,86 @@ async def get_public_certificate(certificate_id: str):
             },
         }
     ), 200
+
+
+@bp.route("/certificates/by-api-key", methods=["POST"])
+async def list_certificates_by_api_key():
+    """Lista certificados del usuario asociado a la API key enviada en body."""
+    data = await request.get_json(silent=True) or {}
+    print(data)
+    api_key = data.get("api_key")
+    if not api_key:
+        return jsonify({"error": "api_key is required"}), 400
+
+    result = await validate_api_key(api_key)
+    if not result:
+        return jsonify({"error": "Invalid API key"}), 401
+
+    user_id, _api_key_id = result
+
+    pool = get_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT
+                c.id,
+                c.external_id,
+                c.certificate_type,
+                c.document_hash,
+                c.metadata,
+                c.verification_url,
+                c.created_at,
+                u.company_name AS issuer_company_name,
+                bt.tx_hash AS transaction_signature,
+                bt.explorer_url,
+                bt.blockchain,
+                bt.network,
+                bt.status AS blockchain_status,
+                bt.confirmed_at
+            FROM certificates c
+            INNER JOIN users u ON u.id = c.user_id
+            LEFT JOIN blockchain_transactions bt ON bt.id = c.blockchain_tx_id
+            WHERE c.user_id = $1
+            ORDER BY c.created_at DESC
+            """,
+            user_id,
+        )
+
+    results = []
+    for row in rows:
+        metadata = row["metadata"]
+        if isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata)
+            except json.JSONDecodeError:
+                metadata = None
+
+        results.append(
+            {
+                "certificate": {
+                    "id": str(row["id"]),
+                    "external_id": row["external_id"],
+                    "certificate_type": row["certificate_type"],
+                    "document_hash": row["document_hash"],
+                    "metadata": metadata,
+                    "verification_url": row["verification_url"],
+                    "created_at": row["created_at"].isoformat(),
+                },
+                "issuer": {
+                    "company_name": row["issuer_company_name"] or "",
+                },
+                "blockchain": {
+                    "transaction_signature": row["transaction_signature"],
+                    "explorer_url": row["explorer_url"],
+                    "blockchain": row["blockchain"],
+                    "network": row["network"],
+                    "status": row["blockchain_status"],
+                    "confirmed_at": row["confirmed_at"].isoformat() if row["confirmed_at"] else None,
+                },
+            }
+        )
+
+    return jsonify({"certificates": results}), 200
 
 
 @bp.route("/certificates/hash", methods=["POST"])
