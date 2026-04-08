@@ -8,3 +8,4 @@ resend==2.2.0
 solana>=0.34.0
 solders>=0.20.0
 base58
+hypercorn
