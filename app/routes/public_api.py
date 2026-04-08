@@ -92,8 +92,8 @@ async def get_public_certificate(certificate_id: str):
     ), 200
 
 
-@bp.route("/certificates/by-api-key", methods=["POST"])
-async def list_certificates_by_api_key():
+@bp.route("/certificates/list", methods=["POST"])
+async def list_certificates():
     """Lista certificados del usuario asociado a la API key enviada en body."""
     data = await request.get_json(silent=True) or {}
     print(data)
